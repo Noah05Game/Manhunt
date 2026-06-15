@@ -1,0 +1,176 @@
+import { ClientEngine, HostEngine, type GameEngine } from "./game/engine";
+import { colorFor, toast } from "./ui/components";
+import type { GameSettings } from "./types";
+
+export interface Ctx {
+  go: (name: string, params?: any) => void;
+  params: any;
+  app: AppState;
+}
+
+export interface Screen {
+  el: HTMLElement;
+  cleanup?: () => void;
+}
+export type ScreenFactory = (ctx: Ctx) => Screen;
+
+export interface Profile {
+  name: string;
+  color: string;
+}
+
+class AppState {
+  engine: GameEngine | null = null;
+  profile: Profile;
+  private screens = new Map<string, ScreenFactory>();
+  private current: { name: string; params: any; screen: Screen } | null = null;
+  private root: HTMLElement;
+  private unbinders: Array<() => void> = [];
+
+  constructor() {
+    this.root = document.getElementById("app")!;
+    const saved = localStorage.getItem("mh-profile");
+    this.profile = saved ? JSON.parse(saved) : { name: "", color: "" };
+  }
+
+  setProfile(name: string) {
+    this.profile = { name, color: colorFor(name) };
+    localStorage.setItem("mh-profile", JSON.stringify(this.profile));
+  }
+
+  register(name: string, factory: ScreenFactory) {
+    this.screens.set(name, factory);
+  }
+
+  go = (name: string, params: any = {}) => {
+    const factory = this.screens.get(name);
+    if (!factory) throw new Error(`No screen: ${name}`);
+    const prev = this.current;
+    if (prev) {
+      prev.screen.el.classList.add("leaving");
+      prev.screen.cleanup?.();
+      const old = prev.screen.el;
+      setTimeout(() => old.remove(), 300);
+    }
+    const ctx: Ctx = { go: this.go, params, app: this };
+    const screen = factory(ctx);
+    screen.el.classList.add("screen");
+    this.root.append(screen.el);
+    this.current = { name, params, screen };
+  };
+
+  private remount() {
+    if (this.current) this.go(this.current.name, this.current.params);
+  }
+
+  // ── session creation ───────────────────────────────────────
+  startHost(code: string, settings: Partial<GameSettings>): HostEngine {
+    this.teardownEngine();
+    const e = new HostEngine(code, this.profile.name, this.profile.color);
+    e.updateSettings(settings);
+    this.bindEngine(e);
+    this.engine = e;
+    return e;
+  }
+
+  startClient(code: string, gen = 0): ClientEngine {
+    this.teardownEngine();
+    const e = new ClientEngine(code, gen, this.profile.name, this.profile.color);
+    this.bindEngine(e);
+    this.engine = e;
+    return e;
+  }
+
+  private teardownEngine() {
+    this.unbinders.forEach((u) => u());
+    this.unbinders = [];
+    this.engine?.destroy();
+    this.engine = null;
+  }
+
+  private bindEngine(e: GameEngine) {
+    this.unbinders.push(
+      e.on("kicked", () => {
+        toast("You were removed from the room", "bad");
+        this.teardownEngine();
+        this.go("home");
+      })
+    );
+    this.unbinders.push(
+      e.on("ended", () => {
+        if (this.current?.name !== "results") this.go("results");
+      })
+    );
+    this.unbinders.push(e.on("toast", (m: string) => toast(m)));
+    this.unbinders.push(e.on("net-error", (err: any) => this.onNetError(err)));
+    if (!e.isHost) {
+      this.unbinders.push((e as ClientEngine).on("host-lost", () => this.handleHostLost()));
+    }
+  }
+
+  private onNetError(err: any) {
+    const type = err?.type;
+    if (type === "peer-unavailable") {
+      toast("Room not found or host offline", "bad");
+    } else if (type === "unavailable-id") {
+      // host id already taken — likely stale; nothing actionable here
+    } else if (type === "network" || type === "server-error") {
+      toast("Network issue — retrying…", "bad");
+    }
+  }
+
+  // ── best-effort host migration ─────────────────────────────
+  private migrating = false;
+  private handleHostLost() {
+    if (this.migrating || !this.engine || this.engine.isHost) return;
+    const state = this.engine.state;
+    if (state.phase === "ended") return;
+    this.migrating = true;
+
+    const candidates = Object.keys(state.players)
+      .filter((id) => id !== state.hostId)
+      .sort();
+    const successor = candidates[0];
+    const myId = this.engine.myId;
+
+    if (!successor) {
+      toast("Host left — room closed", "bad");
+      this.migrating = false;
+      this.teardownEngine();
+      this.go("home");
+      return;
+    }
+
+    if (successor === myId) {
+      toast("You are the new host", "good");
+      const fresh = HostEngine.migrate(state, myId, this.profile.name, this.profile.color);
+      this.unbinders.forEach((u) => u());
+      this.unbinders = [];
+      this.engine?.destroy();
+      this.engine = fresh;
+      this.bindEngine(fresh);
+      fresh.on("ready", () => {
+        this.migrating = false;
+        this.remount();
+      });
+    } else {
+      toast("Host lost — reconnecting…");
+      (this.engine as ClientEngine).retarget(state.gen + 1);
+      (this.engine as ClientEngine).on("connected", () => {
+        this.migrating = false;
+        this.remount();
+      });
+      // give up after 12s
+      setTimeout(() => {
+        if (this.migrating) {
+          this.migrating = false;
+          toast("Could not reconnect", "bad");
+          this.teardownEngine();
+          this.go("home");
+        }
+      }, 12000);
+    }
+  }
+}
+
+export const app = new AppState();

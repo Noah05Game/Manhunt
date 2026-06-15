@@ -1,0 +1,146 @@
+import type { Ctx } from "../state";
+import { el, avatar, toast, vibrate } from "../ui/components";
+import { renderQR, encodeJoin } from "../game/qr";
+import type { GameEngine } from "../game/engine";
+import type { Player } from "../types";
+
+export function lobbyScreen(ctx: Ctx) {
+  const app = ctx.app;
+  const engine = app.engine as GameEngine;
+  if (!engine) {
+    ctx.go("home");
+    return { el: el("div", {}) };
+  }
+  const code = ctx.params.code as string;
+
+  const roster = el("div", { class: "stack" });
+  const statusDot = el("div", { class: "dot" });
+  const statusText = el("span", { class: "meta" }, ["connecting…"]);
+
+  // ── invite (host only) ──
+  let invite: HTMLElement | null = null;
+  if (engine.isHost) {
+    const qrCanvas = el("canvas") as HTMLCanvasElement;
+    renderQR(qrCanvas, encodeJoin(code), 200);
+    const copyBtn = el("button", { class: "btn ghost small", style: "width:auto" }, ["Copy code"]);
+    copyBtn.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(code);
+        toast("Code copied", "good");
+      } catch {
+        toast(code);
+      }
+    });
+    const shareBtn = el("button", { class: "btn ghost small", style: "width:auto" }, ["Share"]);
+    shareBtn.addEventListener("click", () => {
+      const url = location.href.split("#")[0] + `#join=${code}`;
+      (navigator as any).share?.({ title: "Manhunt", text: `Join my Manhunt room: ${code}`, url }) ??
+        navigator.clipboard?.writeText(url);
+    });
+    invite = el("div", { class: "glass card", style: "text-align:center" }, [
+      el("div", { class: "kicker", style: "margin-bottom:12px" }, ["Invite players"]),
+      el("div", { class: "center" }, [
+        el("div", { class: "qr-frame", style: "padding:12px;border-radius:18px" }, [qrCanvas]),
+      ]),
+      el("div", { class: "mono", style: "font-size:30px;letter-spacing:.28em;margin:16px 0 4px" }, [code]),
+      el("div", { class: "row", style: "justify-content:center;gap:10px" }, [copyBtn, shareBtn]),
+    ]);
+  }
+
+  // ── controls ──
+  const readyBtn = el("button", { class: "btn" }, ["Ready up"]);
+  readyBtn.addEventListener("click", () => {
+    const me = engine.me();
+    engine.setReady(!me?.ready);
+  });
+
+  const startBtn = el("button", { class: "btn btn-primary hunter" }, ["Start hunt"]);
+  startBtn.addEventListener("click", () => engine.start());
+
+  function playerRow(p: Player): HTMLElement {
+    const tags: HTMLElement[] = [];
+    if (p.isHost) tags.push(el("span", { class: "tag host" }, ["host"]));
+    tags.push(el("span", { class: `tag ${p.role}` }, [p.role]));
+    if (p.ready) tags.push(el("span", { class: "tag ready" }, ["ready"]));
+
+    const right: HTMLElement[] = [el("div", { class: "row", style: "gap:6px" }, tags)];
+
+    if (engine.isHost && !p.isHost) {
+      const roleSeg = el("div", { class: "seg", style: "padding:3px" }, [
+        el("button", { class: p.role === "hunter" ? "active" : "", style: "padding:6px 10px;font-size:12px" }, ["H"]),
+        el("button", { class: p.role === "hider" ? "active" : "", style: "padding:6px 10px;font-size:12px" }, ["Hide"]),
+      ]);
+      const [hb, db] = roleSeg.children as unknown as HTMLButtonElement[];
+      hb.addEventListener("click", () => engine.assign(p.id, "hunter"));
+      db.addEventListener("click", () => engine.assign(p.id, "hider"));
+      const kick = el("button", { class: "btn danger small", style: "width:auto;padding:8px 10px" }, ["Kick"]);
+      kick.addEventListener("click", () => engine.kick(p.id));
+      right.length = 0;
+      right.push(el("div", { class: "row", style: "gap:6px;flex-wrap:wrap;justify-content:flex-end" }, [...tags, roleSeg, kick]));
+    }
+
+    return el("div", { class: "player-row" }, [
+      avatar(p.name, p.color),
+      el("div", { class: "grow" }, [
+        el("div", { class: "name" }, [p.name + (p.id === engine.myId ? " (you)" : "")]),
+        el("div", { class: "meta" }, [p.id === engine.state.hostId ? "host" : "player"]),
+      ]),
+      el("div", { style: "display:flex;flex-direction:column;align-items:flex-end;gap:6px" }, right),
+    ]);
+  }
+
+  function render() {
+    const st = engine.state;
+    const players = Object.values(st.players);
+    roster.replaceChildren(...players.map(playerRow));
+
+    const connected = engine.isHost || engine.myId in st.players;
+    statusDot.className = `dot ${connected ? "live" : "bad"}`;
+    statusText.textContent = connected
+      ? `${players.length} connected · ${st.settings.numHunters} hunter${st.settings.numHunters > 1 ? "s" : ""}`
+      : "connecting…";
+
+    const me = engine.me();
+    readyBtn.textContent = me?.ready ? "Ready ✓" : "Ready up";
+    readyBtn.classList.toggle("btn-primary", !!me?.ready);
+
+    startBtn.disabled = players.length < 2;
+
+    if (st.phase === "playing") ctx.go("game", { code });
+    if (st.phase === "ended") ctx.go("results");
+  }
+
+  const offUpdate = engine.on("update", render);
+  const offConn = engine.isHost ? () => {} : (engine as any).on("connected", render);
+  render();
+
+  const controls = el("div", { class: "stack", style: "margin-top:16px" }, [readyBtn]);
+  if (engine.isHost) controls.append(startBtn);
+
+  const back = el("button", { class: "btn ghost small", style: "width:auto" }, ["← Leave"]);
+  back.addEventListener("click", () => {
+    offUpdate();
+    offConn?.();
+    (app as any).engine?.destroy();
+    (app as any).engine = null;
+    ctx.go("home");
+  });
+
+  return {
+    cleanup: () => {
+      offUpdate();
+      offConn?.();
+    },
+    el: el("div", {}, [
+      el("div", { class: "field" }),
+      el("div", { class: "row spread" }, [back, el("span", { class: "eyebrow" }, [`room ${code}`])]),
+      el("h1", { class: "title", style: "font-size:2rem;margin-top:12px" }, ["Lobby"]),
+      el("div", { class: "row", style: "gap:8px;margin:6px 0 16px" }, [statusDot, statusText]),
+      ...(invite ? [invite] : []),
+      el("div", { class: "kicker", style: "margin:18px 0 10px" }, ["Players"]),
+      roster,
+      controls,
+      el("div", { style: "height:16px" }),
+    ]),
+  };
+}

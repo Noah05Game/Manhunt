@@ -1,0 +1,81 @@
+import type { Ctx } from "../state";
+import { el } from "../ui/components";
+import { getPlatform, isIosSafari, canPrompt, onPromptAvailable, promptInstall } from "../pwa/install";
+
+const iosSteps = [
+  ["Tap the ", "<b>Share</b> button", " in Safari's toolbar (the square with an up arrow)."],
+  ["Scroll and tap ", "<b>Add to Home Screen</b>", "."],
+  ["Tap ", "<b>Add</b>", " in the top corner."],
+  ["Open ", "<b>Manhunt</b>", " from your home screen — not Safari."],
+];
+const androidSteps = [
+  ["Tap the ", "<b>browser menu</b>", " (⋮) in the top corner."],
+  ["Tap ", "<b>Install app</b>", " or <b>Add to Home screen</b>."],
+  ["Confirm by tapping ", "<b>Install</b>", "."],
+  ["Open ", "<b>Manhunt</b>", " from your home screen."],
+];
+
+export function onboardingScreen(ctx: Ctx) {
+  const platform = getPlatform();
+  const steps = platform === "android" ? androidSteps : iosSteps;
+  const isDevBypass = location.hostname === "localhost" || location.hostname === "127.0.0.1" || platform === "desktop";
+
+  const stepEls = steps.map((s) =>
+    el("div", { class: "step" }, [
+      el("div", { class: "num" }),
+      el("div", { class: "txt", html: s.join("") }),
+    ])
+  );
+
+  const installBtn = el("button", { class: "btn btn-primary", style: "display:none" }, ["Install Manhunt"]);
+  if (platform === "android") {
+    const sync = () => (installBtn.style.display = canPrompt() ? "block" : "none");
+    onPromptAvailable(sync);
+    sync();
+    installBtn.addEventListener("click", () => promptInstall());
+  }
+
+  const warn =
+    platform === "ios" && !isIosSafari()
+      ? el("div", { class: "glass card", style: "border-color:rgba(255,178,61,.4)" }, [
+          el("p", { class: "muted", html: "Open this page in <b>Safari</b> to install. In-app browsers and Chrome on iOS can't add to the home screen." }),
+        ])
+      : null;
+
+  const recheck = el("button", { class: "btn ghost" }, ["I've installed it — open the app"]);
+  recheck.addEventListener("click", () => location.reload());
+
+  const children: (HTMLElement | Node)[] = [
+    el("div", { class: "field" }, [
+      el("div", { class: "sweep" }),
+      el("div", { class: "ring" }),
+      el("div", { class: "ring" }),
+      el("div", { class: "ring" }),
+    ]),
+    el("span", { class: "eyebrow" }, ["// real-world pursuit"]),
+    el("h1", { class: "title" }, ["Install\nManhunt"]),
+    el("p", { class: "subtitle" }, [
+      "Manhunt runs as an app on your phone for GPS, camera and background play. Add it to your home screen to continue.",
+    ]),
+    el("div", { class: "glass card", style: "margin-top:18px" }, [
+      el("div", { class: "kicker", style: "margin-bottom:12px" }, [
+        platform === "android" ? "Android · install steps" : "iPhone · install steps",
+      ]),
+      el("div", { class: "steps" }, stepEls),
+    ]),
+  ];
+  if (warn) children.push(warn);
+  children.push(el("div", { class: "spacer" }));
+  if (platform === "android") children.push(installBtn);
+  children.push(recheck);
+
+  if (isDevBypass) {
+    const skip = el("button", { class: "btn ghost small", style: "margin-top:10px;align-self:center" }, [
+      "Continue in browser (dev/desktop)",
+    ]);
+    skip.addEventListener("click", () => ctx.go("home"));
+    children.push(skip);
+  }
+
+  return { el: el("div", {}, children) };
+}
