@@ -27,13 +27,13 @@ jobs:
 
       - run: npm ci
 
-      # For a project site (https://<user>.github.io/<repo>/) the base path must
-      # be "/<repo>/". We derive it automatically from the repository name.
-      # For a user/org root site (<user>.github.io) set BASE_PATH=/ below instead.
       - name: Build
         run: npm run build
         env:
           BASE_PATH: /${{ github.event.repository.name }}/
+
+      - name: Add .nojekyll
+        run: touch dist/.nojekyll
 
       - uses: actions/upload-pages-artifact@v3
         with:
